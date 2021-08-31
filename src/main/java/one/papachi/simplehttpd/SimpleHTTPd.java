@@ -1,189 +1,179 @@
 package one.papachi.simplehttpd;
 
-import java.io.BufferedReader;
-import java.io.BufferedWriter;
+import java.io.BufferedInputStream;
+import java.io.BufferedOutputStream;
+import java.io.ByteArrayInputStream;
+import java.io.ByteArrayOutputStream;
 import java.io.IOException;
-import java.io.InputStreamReader;
+import java.io.InputStream;
 import java.io.OutputStreamWriter;
 import java.io.PrintWriter;
-import java.io.StringWriter;
 import java.net.InetSocketAddress;
 import java.net.ServerSocket;
 import java.net.Socket;
 import java.net.URLDecoder;
 import java.nio.charset.StandardCharsets;
+import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.LinkedHashSet;
+import java.util.List;
 import java.util.Map;
 import java.util.Set;
-import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
 import java.util.function.Function;
 
 /**
- * Single threaded HTTP Server to process incoming HTTPRequest using user defined function returning HTTPResponse.
+ * Simple multi-threaded HTTP server.
  */
 public class SimpleHTTPd implements Runnable {
 
     /**
-     * Socket address that will use SimpleHTTPd to listen on.
+     * Executor service which is used to process HTTP requests.
      */
-    protected final InetSocketAddress socketAddress;
+    private final ExecutorService executorService = Executors.newCachedThreadPool();
 
     /**
-     * User defined function that processes HTTPRequest and returns HTTPResponse
+     * Function that takes HTTPRequest and returns HTTPResponse.
      */
-    protected final Function<HTTPRequest, HTTPResponse> processor;
+    private final Function<HTTPRequest, HTTPResponse> handler;
 
     /**
-     * Flag to determine if SimpleHTTPd is listening for incoming HTTP Requests
+     * Socket address to use in bind for ServerSocket .
      */
-    protected final AtomicBoolean isRunning = new AtomicBoolean();
+    private final InetSocketAddress socketAddress;
 
     /**
-     * ServerSocket object
+     * @param handler java.util.Function that takes HTTPRequest and returns HTTPResponse
+     * @param socketAddress socket address to use in bind for ServerSocket
      */
-    protected ServerSocket serverSocket;
-
-    /**
-     * @param socketAddress address to listen on for incoming HTTP Requests
-     * @param processor function to process HTTPRequest returning HTTPResponse
-     */
-    public SimpleHTTPd(InetSocketAddress socketAddress, Function<HTTPRequest, HTTPResponse> processor) {
+    public SimpleHTTPd(Function<HTTPRequest, HTTPResponse> handler, InetSocketAddress socketAddress) {
+        this.handler = handler;
         this.socketAddress = socketAddress;
-        this.processor = processor;
     }
 
     /**
-     * Start accepting and processing incoming HTTP Requests using user defined function.
+     * Main loop of the HTTP server.
      */
-    public void start() {
-        if (!isRunning.compareAndSet(false, true))
-            return;
-        run();
-    }
-
-    /**
-     * Stops processing incoming HTTP Requests.
-     */
-    public void stop() {
-        if (!isRunning.compareAndSet(true, false))
-            return;
-        try {
-            serverSocket.close();
-        } catch (IOException e) {
-        } finally {
-            serverSocket = null;
-        }
-    }
-
-    /**
-     * @return true if SimpleHTTPd is running
-     */
-    public boolean isRunning() {
-        return isRunning.get();
-    }
-
-    /**
-     * Forever loop to process incoming HTTP Requests until SimpleHTTPd is stopped.
-     */
+    @Override
     public void run() {
-        try {
-            serverSocket = new ServerSocket();
+        try (ServerSocket serverSocket = new ServerSocket()) {
             serverSocket.bind(socketAddress);
+            while (!serverSocket.isClosed()) {
+                Socket client = serverSocket.accept();
+                executorService.execute(() -> process(client));
+            }
         } catch (IOException e) {
-            stop();
-            return;
+            e.printStackTrace();
         }
-        while (isRunning.get()) {
-            try (Socket socket = serverSocket.accept()) {
-                HTTPRequest request = process(socket);
-                HTTPResponse response;
-                try {
-                    response = processor.apply(request);
-                } catch (Exception e) {
-                    StringWriter stringWriter = new StringWriter();
-                    e.printStackTrace(new PrintWriter(stringWriter));
-                    response = new HTTPResponse("HTTP/1.1 500 Internal Server Error", Map.of("Content-Type", "text/plain", "Connection", "close"), stringWriter.toString());
+    }
+
+    /**
+     * @param socket represents a connection to the HTTP client.
+     */
+    private void process(Socket socket) {
+        try (Socket client = socket) {
+            BufferedInputStream inputStream = new BufferedInputStream(client.getInputStream());
+            BufferedOutputStream outputStream = new BufferedOutputStream(client.getOutputStream());
+            String method, path, version;
+            Map<String, String> queryParameters = new LinkedHashMap<>();
+            Map<String, Set<String>> queryParametersMultiValue = new LinkedHashMap<>();
+            Map<String, String> headers = new LinkedHashMap<>();
+            InputStream body;
+            List<String> lines = new ArrayList<>();
+            String[] split;
+            byte[] bytes;
+            while ((bytes = readLine(inputStream)) != null) {
+                lines.add(new String(bytes, StandardCharsets.ISO_8859_1));
+            }
+            split = lines.get(0).split("\\s", 3);
+            method = split[0];
+            path = split[1];
+            version = split[2];
+            split = path.split("\\?", 2);
+            path = split[0];
+            if (split.length == 2) {
+                split = split[1].split("&");
+                for (String s : split) {
+                    String[] split1 = s.split("=");
+                    String key = URLDecoder.decode(split1[0], StandardCharsets.UTF_8);
+                    String value = URLDecoder.decode(split1[1], StandardCharsets.UTF_8);
+                    queryParameters.putIfAbsent(key, value);
+                    queryParametersMultiValue.compute(key, (k, v) -> {
+                        v = v != null ? v : new LinkedHashSet<>();
+                        v.add(value);
+                        return v;
+                    });
                 }
-                process(socket, response);
-            } catch (IOException e) {
             }
-        }
-        stop();
-    }
-
-    /**
-     * Reads HTTP headers and body from socket's inputStream.
-     * @param socket from which we are reading data
-     * @return SimpleHTTPd.HTTPRequest
-     * @throws IOException if any IO operation fails
-     */
-    protected HTTPRequest process(Socket socket) throws IOException {
-        BufferedReader reader = new BufferedReader(new InputStreamReader(socket.getInputStream(), StandardCharsets.ISO_8859_1));
-        String string = reader.readLine();
-        String[] split = string.split("\\s", 3);
-        String method = split[0];
-        String path = split[1];
-        String version = split[2];
-        split = path.split("\\?", 2);
-        path = split[0];
-        Map<String, String> params = new LinkedHashMap<>();
-        Map<String, Set<String>> paramsMultiValue = new LinkedHashMap<>();
-        if (split.length == 2) {
-            split = split[1].split("&");
-            for (String s : split) {
-                String[] split1 = s.split("=");
-                String key = URLDecoder.decode(split1[0], StandardCharsets.UTF_8);
-                String value = URLDecoder.decode(split1[1], StandardCharsets.UTF_8);
-                params.putIfAbsent(key, value);
-                paramsMultiValue.compute(key, (k, v) -> {
-                    v = v != null ? v : new LinkedHashSet<>();
-                    v.add(value);
-                    return  v;
-                });
+            lines.stream().skip(1L).forEach(string -> {
+                String[] split1 = string.split(":", 2);
+                headers.put(split1[0].trim(), split1[1].trim());
+            });
+            long contentLength = Long.parseLong(headers.getOrDefault("Content-Length", "0"));
+            body = new InputStream() {
+                long counter;
+                @Override
+                public int read() throws IOException {
+                    if (counter++ == contentLength)
+                        return -1;
+                    return inputStream.read();
+                }
+            };
+            HTTPRequest request = new HTTPRequest(method, path, version, queryParameters, queryParametersMultiValue, headers, body);
+            HTTPResponse response;
+            try {
+                 response = handler.apply(request);
+            } catch (Exception e) {
+                ByteArrayOutputStream os = new ByteArrayOutputStream();
+                e.printStackTrace(new PrintWriter(new OutputStreamWriter(os)));
+                response = new HTTPResponse("HTTP/1.1 500 Internal Server Error", Map.of("Content-Type", "text/plain"), new ByteArrayInputStream(os.toByteArray()));
             }
+            outputStream.write((response.statusLine + "\r\n").getBytes(StandardCharsets.ISO_8859_1));
+            outputStream.write("Connection: close\r\n".getBytes(StandardCharsets.ISO_8859_1));
+            for (Map.Entry<String, String> entry : response.headers.entrySet())
+                outputStream.write((entry.getKey() + ": " + entry.getValue() + "\r\n").getBytes(StandardCharsets.ISO_8859_1));
+            outputStream.write("\r\n".getBytes(StandardCharsets.ISO_8859_1));
+            int i;
+            while ((i = response.body.read()) != -1)
+                outputStream.write(i);
+        } catch (IOException e) {
+            e.printStackTrace();
         }
-        Map<String, String> headers = new LinkedHashMap<>();
-        while ((string = reader.readLine()) != null && !string.isEmpty()) {
-            split = string.split(":", 2);
-            headers.put(split[0].trim(), split[1].trim());
+    }
+
+    /**
+     * @param inputStream source from which reads the data
+     * @return byte[] containing the line from HTTP request
+     * @throws IOException if any input/output operation fails
+     */
+    private byte[] readLine(InputStream inputStream) throws IOException {
+        ByteArrayOutputStream outputStream = new ByteArrayOutputStream();
+        boolean cr = false, lf = false;
+        int i;
+        while (!(cr && lf) && (i = inputStream.read()) != -1) {
+            if (i == '\r')
+                cr = true;
+            else if (i == '\n')
+                lf = true;
+            else
+                outputStream.write(i);
         }
-        int contentLength = Integer.parseInt(headers.getOrDefault("Content-Length", "0"));
-        byte[] array = new byte[contentLength];
-        for (int i = 0, c; (i < contentLength && (c = reader.read()) != -1); i++)
-            array[i] = (byte) c;
-        String body = new String(array, StandardCharsets.UTF_8);
-        return new HTTPRequest(method, path, version, headers, params, paramsMultiValue, body);
+        return outputStream.size() > 0 ? outputStream.toByteArray() : null;
+    }
+
+
+    /**
+     * Record holding parsed HTTP request.
+     */
+    public static record HTTPRequest(String method, String path, String version, Map<String, String> queryParameters,
+                                     Map<String, Set<String>> queryParametersMultiValue, Map<String, String> headers,
+                                     InputStream body) {
     }
 
     /**
-     * Writes HTTP response headers and body to given socket based in response object.
-     * @param socket Socket to write the HTTP Response
-     * @param response HTTP Response object to write to Socket
-     * @throws IOException if any IO operation fails
+     * Record holding HTTP response data to write to client's socket.
      */
-    protected void process(Socket socket, HTTPResponse response) throws IOException {
-        BufferedWriter writer = new BufferedWriter(new OutputStreamWriter(socket.getOutputStream()));
-        writer.write(response.status + "\r\n");
-        for (Map.Entry<String, String> entry : response.headers.entrySet())
-            writer.write(entry.getKey() + ": " + entry.getValue() + "\r\n");
-        writer.write("Connection: close\r\n");
-        writer.write("\r\n");
-        if (response.body != null && !response.body.isEmpty())
-            writer.write(response.body);
-        writer.close();
-    }
-
-    /**
-     * Record storing all necessary information from HTTP Request made to SimpleHTTPd
-     */
-    public static record HTTPRequest(String method, String path, String version, Map<String, String> headers, Map<String, String> params, Map<String, Set<String>> paramsMultiValue, String body) {
-    }
-
-    /**
-     * Record storing all necessary information to respond to HTTP Request made to SimpleHTTPd
-     */
-    public static record HTTPResponse(String status, Map<String, String> headers, String body) {
-    }
+    public static record HTTPResponse(String statusLine, Map<String, String> headers, InputStream body) {}
 
 }
