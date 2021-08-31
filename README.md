@@ -1,4 +1,5 @@
 # SimpleHTTPd
+
 Simple multi-threaded HTTP Server.
 
 Usage:
@@ -6,7 +7,9 @@ Usage:
 ```java
 import one.papachi.simplehttpd.SimpleHTTPd;
 
+import java.io.ByteArrayInputStream;
 import java.net.InetSocketAddress;
+import java.nio.charset.StandardCharsets;
 import java.util.Map;
 import java.util.function.Function;
 
@@ -16,7 +19,7 @@ public class Server {
         Function<HTTPRequest, HTTPResponse> handler = httpRequest ->
                 new HTTPResponse("HTTP/1.1 200 OK",
                         Map.of("Content-Type", "text/plain"),
-                        "Hello world!");
+                        new ByteArrayInputStream("Hello world!".getBytes()));
         SimpleHTTPd httpd = new SimpleHTTPd(handler, socketAddress);
         new Thread(httpd).start();
     }
