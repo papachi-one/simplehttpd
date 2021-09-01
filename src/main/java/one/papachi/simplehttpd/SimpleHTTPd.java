@@ -6,8 +6,8 @@ import java.io.ByteArrayInputStream;
 import java.io.ByteArrayOutputStream;
 import java.io.IOException;
 import java.io.InputStream;
-import java.io.OutputStreamWriter;
 import java.io.PrintWriter;
+import java.io.StringWriter;
 import java.net.InetSocketAddress;
 import java.net.ServerSocket;
 import java.net.Socket;
@@ -125,9 +125,7 @@ public class SimpleHTTPd implements Runnable {
             try {
                  response = handler.apply(request);
             } catch (Exception e) {
-                ByteArrayOutputStream os = new ByteArrayOutputStream();
-                e.printStackTrace(new PrintWriter(new OutputStreamWriter(os)));
-                response = new HTTPResponse("HTTP/1.1 500 Internal Server Error", Map.of("Content-Type", "text/plain"), new ByteArrayInputStream(os.toByteArray()));
+                response = HTTPResponse.exceptionResponse(e);
             }
             outputStream.write((response.statusLine + "\r\n").getBytes(StandardCharsets.ISO_8859_1));
             outputStream.write("Connection: close\r\n".getBytes(StandardCharsets.ISO_8859_1));
@@ -137,6 +135,7 @@ public class SimpleHTTPd implements Runnable {
             int i;
             while ((i = response.body.read()) != -1)
                 outputStream.write(i);
+            outputStream.flush();
         } catch (IOException e) {
             e.printStackTrace();
         }
@@ -174,6 +173,38 @@ public class SimpleHTTPd implements Runnable {
     /**
      * Record holding HTTP response data to write to client's socket.
      */
-    public static record HTTPResponse(String statusLine, Map<String, String> headers, InputStream body) {}
+    public static record HTTPResponse(String statusLine, Map<String, String> headers, InputStream body) {
+
+        public static HTTPResponse exceptionResponse(Exception e) {
+            StringWriter stringWriter = new StringWriter();
+            PrintWriter printWriter = new PrintWriter(stringWriter);
+            e.printStackTrace(printWriter);
+            String string = stringWriter.toString();
+            byte[] body = string.getBytes(StandardCharsets.UTF_8);
+            ByteArrayInputStream inputStream = new ByteArrayInputStream(body);
+            return new HTTPResponse("HTTP/1.1 500 Internal Server Error", Map.of("Content-Type", "text/plain"), inputStream);
+        }
+
+        public static HTTPResponse jsonResponse(String json) {
+            return new HTTPResponse("HTTP/1.1 200 OK", Map.of("Content-Type", "application/json"), new ByteArrayInputStream(json.getBytes(StandardCharsets.UTF_8)));
+        }
+
+        public static HTTPResponse htmlResponse(String html) {
+            return new HTTPResponse("HTTP/1.1 200 OK", Map.of("Content-Type", "text/html; charset=UTF-8"), new ByteArrayInputStream(html.getBytes(StandardCharsets.UTF_8)));
+        }
+
+        public static HTTPResponse textResponse(String text) {
+            return new HTTPResponse("HTTP/1.1 200 OK", Map.of("Content-Type", "text/plain; charset=UTF-8"), new ByteArrayInputStream(text.getBytes(StandardCharsets.UTF_8)));
+        }
+
+        public static HTTPResponse cssResponse(String css) {
+            return new HTTPResponse("HTTP/1.1 200 OK", Map.of("Content-Type", "text/css; charset=UTF-8"), new ByteArrayInputStream(css.getBytes(StandardCharsets.UTF_8)));
+        }
+
+        public static HTTPResponse jsResponse(String js) {
+            return new HTTPResponse("HTTP/1.1 200 OK", Map.of("Content-Type", "text/javascript; charset=UTF-8"), new ByteArrayInputStream(js.getBytes(StandardCharsets.UTF_8)));
+        }
+
+    }
 
 }
