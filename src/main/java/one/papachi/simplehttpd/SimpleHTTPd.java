@@ -11,12 +11,9 @@ import java.io.StringWriter;
 import java.net.InetSocketAddress;
 import java.net.ServerSocket;
 import java.net.Socket;
-import java.net.URLDecoder;
 import java.nio.charset.StandardCharsets;
-import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.LinkedHashSet;
-import java.util.List;
 import java.util.Map;
 import java.util.Set;
 import java.util.concurrent.ExecutorService;
@@ -69,58 +66,14 @@ public class SimpleHTTPd implements Runnable {
     }
 
     /**
+     * Processes single HTTP request
      * @param socket represents a connection to the HTTP client.
      */
     private void process(Socket socket) {
         try (Socket client = socket) {
             BufferedInputStream inputStream = new BufferedInputStream(client.getInputStream());
             BufferedOutputStream outputStream = new BufferedOutputStream(client.getOutputStream());
-            String method, path, version;
-            Map<String, String> queryParameters = new LinkedHashMap<>();
-            Map<String, Set<String>> queryParametersMultiValue = new LinkedHashMap<>();
-            Map<String, String> headers = new LinkedHashMap<>();
-            InputStream body;
-            List<String> lines = new ArrayList<>();
-            String[] split;
-            byte[] bytes;
-            while ((bytes = readLine(inputStream)) != null) {
-                lines.add(new String(bytes, StandardCharsets.ISO_8859_1));
-            }
-            split = lines.get(0).split("\\s", 3);
-            method = split[0];
-            path = split[1];
-            version = split[2];
-            split = path.split("\\?", 2);
-            path = split[0];
-            if (split.length == 2) {
-                split = split[1].split("&");
-                for (String s : split) {
-                    String[] split1 = s.split("=");
-                    String key = URLDecoder.decode(split1[0], StandardCharsets.UTF_8);
-                    String value = URLDecoder.decode(split1[1], StandardCharsets.UTF_8);
-                    queryParameters.putIfAbsent(key, value);
-                    queryParametersMultiValue.compute(key, (k, v) -> {
-                        v = v != null ? v : new LinkedHashSet<>();
-                        v.add(value);
-                        return v;
-                    });
-                }
-            }
-            lines.stream().skip(1L).forEach(string -> {
-                String[] split1 = string.split(":", 2);
-                headers.put(split1[0].trim(), split1[1].trim());
-            });
-            long contentLength = Long.parseLong(headers.getOrDefault("Content-Length", "0"));
-            body = new InputStream() {
-                long counter;
-                @Override
-                public int read() throws IOException {
-                    if (counter++ == contentLength)
-                        return -1;
-                    return inputStream.read();
-                }
-            };
-            HTTPRequest request = new HTTPRequest(method, path, version, queryParameters, queryParametersMultiValue, headers, body);
+            HTTPRequest request = readRequest(inputStream);
             HTTPResponse response;
             try {
                  response = handler.apply(request);
@@ -142,11 +95,67 @@ public class SimpleHTTPd implements Runnable {
     }
 
     /**
+     * Reads and parses HTTP request
+     * @param inputStream
+     * @return HTTP Request object
+     * @throws IOException
+     */
+    private HTTPRequest readRequest(InputStream inputStream) throws IOException {
+        // request line + query params
+        Map<String, String> paramsSingleValue = new LinkedHashMap<>();
+        Map<String, Set<String>> paramsMultiValue = new LinkedHashMap<>();
+        String[] split = new String(readLine(inputStream)).split("\\s", 3);
+        String[] split1 = split[1].split("\\?", 2);
+        String[] split2 = split1.length == 2 ? split1[1].split("&") : new String[0];
+        for (String string : split2) {
+            String[] split3 = string.split("=", 2);
+            paramsSingleValue.putIfAbsent(split3[0], split3.length == 2 ? split3[1] : null);
+            paramsMultiValue.compute(split3[0], (k, v) -> {
+                v = v != null ? v : new LinkedHashSet<>();
+                v.add(split3.length == 2 ? split3[1] : null);
+                return v;
+            });
+        }
+        HTTPRequestLine requestLine = new HTTPRequestLine(split[0], split1[0], split[2]);
+        HTTPQueryParameters params = new HTTPQueryParameters(paramsSingleValue, paramsMultiValue);
+
+        // headers
+        Map<String, String> headersSingleValue = new LinkedHashMap<>();
+        Map<String, Set<String>> headersMultiValue = new LinkedHashMap<>();
+        String line;
+        while ((line = readLine(inputStream)) != null) {
+            String[] split4 = line.split(":\\s+", 2);
+            headersSingleValue.putIfAbsent(split4[0], split4.length == 2 ? split4[1] : null);
+            headersMultiValue.compute(split[0], (k, v) -> {
+                v = v != null ? v : new LinkedHashSet<>();
+                v.add(split4.length == 2 ? split4[1] : null);
+                return v;
+            });
+        }
+        HTTPHeaders headers = new HTTPHeaders(headersSingleValue, headersMultiValue);
+
+        // body
+        long contentLength = Long.parseLong(headersSingleValue.getOrDefault("Content-Length", "0"));
+        InputStream bodyInputStream = new InputStream() {
+            long counter;
+            @Override
+            public int read() throws IOException {
+                if (counter++ == contentLength)
+                    return -1;
+                return inputStream.read();
+            }
+        };
+        HTTPBody body = new HTTPBody(bodyInputStream);
+
+        return new HTTPRequest(requestLine, headers, params, body);
+    }
+
+    /**
      * @param inputStream source from which reads the data
      * @return byte[] containing the line from HTTP request
      * @throws IOException if any input/output operation fails
      */
-    private byte[] readLine(InputStream inputStream) throws IOException {
+    private byte[] readLineBytes(InputStream inputStream) throws IOException {
         ByteArrayOutputStream outputStream = new ByteArrayOutputStream();
         boolean cr = false, lf = false;
         int i;
@@ -161,19 +170,66 @@ public class SimpleHTTPd implements Runnable {
         return outputStream.size() > 0 ? outputStream.toByteArray() : null;
     }
 
+    /**
+     * @param inputStream source from which reads the data
+     * @return String containing the line from HTTP request
+     * @throws IOException if any input/output operation fails
+     */
+    private String readLine(InputStream inputStream) throws IOException {
+        byte[] bytes = readLineBytes(inputStream);
+        return bytes != null && bytes.length > 0 ? new String(bytes, StandardCharsets.ISO_8859_1) : null;
+    }
+
+    /**
+     * Record for HTTP Request Line
+     */
+    public static record HTTPRequestLine(String method, String path, String version) {
+    }
+
+    /**
+     * Record for HTTP headers (single/multi value)
+     */
+    public static record HTTPHeaders(Map<String, String> headers, Map<String, Set<String>> headersMultiValue) {
+    }
+
+    /**
+     * Record for parsed query parameters as single and multi value maps
+     */
+    public static record HTTPQueryParameters(Map<String, String> params, Map<String, Set<String>> paramsMultiValue) {
+    }
+
+    /**
+     * Record for holding inputStream representing HTTP Request Body
+     */
+    public static record HTTPBody(InputStream inputStream) {
+    }
 
     /**
      * Record holding parsed HTTP request.
      */
-    public static record HTTPRequest(String method, String path, String version, Map<String, String> queryParameters,
-                                     Map<String, Set<String>> queryParametersMultiValue, Map<String, String> headers,
-                                     InputStream body) {
+    public static record HTTPRequest(HTTPRequestLine requestLine, HTTPHeaders headers, HTTPQueryParameters params, HTTPBody body) {
     }
 
     /**
      * Record holding HTTP response data to write to client's socket.
      */
     public static record HTTPResponse(String statusLine, Map<String, String> headers, InputStream body) {
+
+        public static final String STATUS_200_OK = "HTTP/1.1 200 OK";
+
+        public static final String STATUS_500_INTERNAL_SERVER_ERROR = "HTTP/1.1 500 Internal Server Error";
+
+        public static final String CONTENT_TYPE_TEXT_PLAIN = "text/plain; charset=UTF-8";
+
+        public static final String CONTENT_TYPE_TEXT_HTML = "text/html; charset=UTF-8";
+
+        public static final String CONTENT_TYPE_TEXT_CSS = "text/css; charset=UTF-8";
+
+        public static final String CONTENT_TYPE_TEXT_JAVASCRIPT = "text/javascript";
+
+        public static final String CONTENT_TYPE_APPLICATION_JSON = "application/json";
+
+        public static final String CONTENT_TYPE_APPLICATION_OCTET_STREAM = "application/octet-stream";
 
         public static HTTPResponse exceptionResponse(Exception e) {
             StringWriter stringWriter = new StringWriter();
@@ -182,27 +238,11 @@ public class SimpleHTTPd implements Runnable {
             String string = stringWriter.toString();
             byte[] body = string.getBytes(StandardCharsets.UTF_8);
             ByteArrayInputStream inputStream = new ByteArrayInputStream(body);
-            return new HTTPResponse("HTTP/1.1 500 Internal Server Error", Map.of("Content-Type", "text/plain"), inputStream);
+            return new HTTPResponse(STATUS_500_INTERNAL_SERVER_ERROR, Map.of("Content-Type", CONTENT_TYPE_TEXT_PLAIN), inputStream);
         }
 
-        public static HTTPResponse jsonResponse(String json) {
-            return new HTTPResponse("HTTP/1.1 200 OK", Map.of("Content-Type", "application/json"), new ByteArrayInputStream(json.getBytes(StandardCharsets.UTF_8)));
-        }
-
-        public static HTTPResponse htmlResponse(String html) {
-            return new HTTPResponse("HTTP/1.1 200 OK", Map.of("Content-Type", "text/html; charset=UTF-8"), new ByteArrayInputStream(html.getBytes(StandardCharsets.UTF_8)));
-        }
-
-        public static HTTPResponse textResponse(String text) {
-            return new HTTPResponse("HTTP/1.1 200 OK", Map.of("Content-Type", "text/plain; charset=UTF-8"), new ByteArrayInputStream(text.getBytes(StandardCharsets.UTF_8)));
-        }
-
-        public static HTTPResponse cssResponse(String css) {
-            return new HTTPResponse("HTTP/1.1 200 OK", Map.of("Content-Type", "text/css; charset=UTF-8"), new ByteArrayInputStream(css.getBytes(StandardCharsets.UTF_8)));
-        }
-
-        public static HTTPResponse jsResponse(String js) {
-            return new HTTPResponse("HTTP/1.1 200 OK", Map.of("Content-Type", "text/javascript; charset=UTF-8"), new ByteArrayInputStream(js.getBytes(StandardCharsets.UTF_8)));
+        public static HTTPResponse response(String contentType, String body) {
+            return new HTTPResponse(STATUS_200_OK, Map.of("Content-Type", contentType), new ByteArrayInputStream(body.getBytes(StandardCharsets.UTF_8)));
         }
 
     }
