@@ -233,11 +233,8 @@ public class SimpleHTTPd implements Runnable {
 
         public static HTTPResponse exceptionResponse(Exception e) {
             StringWriter stringWriter = new StringWriter();
-            PrintWriter printWriter = new PrintWriter(stringWriter);
-            e.printStackTrace(printWriter);
-            String string = stringWriter.toString();
-            byte[] body = string.getBytes(StandardCharsets.UTF_8);
-            ByteArrayInputStream inputStream = new ByteArrayInputStream(body);
+            e.printStackTrace(new PrintWriter(stringWriter));
+            ByteArrayInputStream inputStream = new ByteArrayInputStream(stringWriter.toString().getBytes(StandardCharsets.UTF_8));
             return new HTTPResponse(STATUS_500_INTERNAL_SERVER_ERROR, Map.of("Content-Type", CONTENT_TYPE_TEXT_PLAIN), inputStream);
         }
 
