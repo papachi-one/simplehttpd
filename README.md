@@ -1,9 +1,6 @@
 # SimpleHTTPd
-
 Simple multi-threaded HTTP Server.
-
-Usage:
-
+## Sample code
 ```java
 import one.papachi.simplehttpd.SimpleHTTPd;
 
