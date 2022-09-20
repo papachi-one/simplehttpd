@@ -104,7 +104,7 @@ public class SimpleHTTPd implements Runnable {
         // request line + query params
         Map<String, String> paramsSingleValue = new LinkedHashMap<>();
         Map<String, Set<String>> paramsMultiValue = new LinkedHashMap<>();
-        String[] split = new String(readLine(inputStream)).split("\\s", 3);
+        String[] split = readLine(inputStream).split("\\s", 3);
         String[] split1 = split[1].split("\\?", 2);
         String[] split2 = split1.length == 2 ? split1[1].split("&") : new String[0];
         for (String string : split2) {
